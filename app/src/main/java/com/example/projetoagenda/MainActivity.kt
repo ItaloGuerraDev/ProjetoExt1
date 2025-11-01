@@ -13,12 +13,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
@@ -27,12 +29,17 @@ import com.example.projetoagenda.ui.theme.ProjetoAgendaTheme
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 @Serializable
 sealed class ContentBlock {
     @Serializable
     data class TextBlock(val text: String) : ContentBlock()
+
     @Serializable
     data class ImageBlock(val uri: String) : ContentBlock()
 }
@@ -41,47 +48,67 @@ sealed class ContentBlock {
 data class Note(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
-    val content: List<ContentBlock>
+    val content: List<ContentBlock>,
+    val date: String
 )
 
 class NoteRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("notes_prefs", Context.MODE_PRIVATE)
     private val notesKey = "notes_list"
 
+    private val json = Json { ignoreUnknownKeys = true }
+    private val sdf = SimpleDateFormat("dd/MM/yyyy", Locale.forLanguageTag("pt-BR")).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
+
     fun getNotes(): List<Note> {
-        try {
-            val notesJson = prefs.getString(notesKey, null)
-            if (notesJson != null) {
-                return Json.decodeFromString<List<Note>>(notesJson).sortedBy { it.title }
+
+        val notesJson = prefs.getString(notesKey, null)
+        if (notesJson != null) {
+            try {
+                return json.decodeFromString<List<Note>>(notesJson).sortedBy { it.title }
+            } catch (e: Exception) {
+
             }
-        } catch (e: ClassCastException) {
-            // It's likely the old String Set format.
-        } catch (e: Exception) {
-            // Some other JSON decoding error.
         }
 
-        // Migration from old format
-        val oldNotesSet = prefs.getStringSet(notesKey, null) ?: return emptyList()
-        val migratedNotes = oldNotesSet.map { noteString ->
-            val parts = if (noteString.contains(";;;")) noteString.split(";;;", limit = 3) else null
-            Note(
-                id = parts?.get(0) ?: UUID.randomUUID().toString(),
-                title = parts?.get(1) ?: noteString,
-                content = listOf(ContentBlock.TextBlock(parts?.get(2) ?: noteString))
-            )
+        try {
+            val oldNotesSet = prefs.getStringSet(notesKey, null)
+            if (oldNotesSet != null) {
+                val currentDate = sdf.format(Date())
+                val migratedNotes = oldNotesSet.map { noteString ->
+                    val parts = if (noteString.contains(";;;")) noteString.split(";;;", limit = 3) else null
+                    Note(
+                        id = parts?.get(0) ?: UUID.randomUUID().toString(),
+                        title = parts?.get(1) ?: noteString,
+                        content = listOf(ContentBlock.TextBlock(parts?.get(2) ?: noteString)),
+                        date = currentDate
+                    )
+                }
+                saveNotes(migratedNotes)
+                return migratedNotes.sortedBy { it.title }
+            }
+        } catch (e: ClassCastException) {
+
         }
-        // Save in new format right away to complete migration
-        saveNotes(migratedNotes)
-        return migratedNotes.sortedBy { it.title }
+
+        prefs.edit { clear() }
+        return emptyList()
     }
 
     fun saveNotes(notes: List<Note>) {
-        val notesJson = Json.encodeToString(notes)
+        val notesJson = json.encodeToString(notes)
         prefs.edit {
-            remove(notesKey) // Make sure to remove old format if present
+            remove(notesKey)
             putString(notesKey, notesJson)
         }
     }
+}
+
+sealed class AppScreen {
+    object NoteList : AppScreen()
+    data class EditNote(val note: Note) : AppScreen()
+    object Calendar : AppScreen()
 }
 
 class MainActivity : ComponentActivity() {
@@ -101,36 +128,54 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun NotesApp(repository: NoteRepository) {
     var notes by remember { mutableStateOf(repository.getNotes()) }
-    var selectedNote by remember { mutableStateOf<Note?>(null) }
+    var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.NoteList) }
 
     fun updateNotes(newNotes: List<Note>) {
         notes = newNotes.sortedBy { it.title }
         repository.saveNotes(newNotes)
     }
 
-    if (selectedNote == null) {
-        NoteScreen(
-            notes = notes,
-            onAddNote = {
-                val newNote = Note(title = "New Note", content = listOf(ContentBlock.TextBlock("")))
-                updateNotes(notes + newNote)
-                selectedNote = newNote
-            },
-            onNoteClick = {
-                selectedNote = it
-            },
-            onDeleteNote = { note ->
-                updateNotes(notes - note)
-            }
-        )
-    } else {
-        selectedNote?.let { note ->
+    when (val screen = currentScreen) {
+        is AppScreen.NoteList -> {
+            NoteScreen(
+                notes = notes,
+                onAddNote = {
+                    val sdf = SimpleDateFormat("dd/MM/yyyy", Locale.forLanguageTag("pt-BR")).apply { timeZone = TimeZone.getTimeZone("UTC") }
+                    val newNote = Note(
+                        title = "New Note",
+                        content = listOf(ContentBlock.TextBlock("")),
+                        date = sdf.format(Date())
+                    )
+                    updateNotes(notes + newNote)
+                    currentScreen = AppScreen.EditNote(newNote)
+                },
+                onNoteClick = { note ->
+                    currentScreen = AppScreen.EditNote(note)
+                },
+                onDeleteNote = { note ->
+                    updateNotes(notes - note)
+                },
+                onMenuClick = {
+                    currentScreen = AppScreen.Calendar
+                }
+            )
+        }
+
+        is AppScreen.EditNote -> {
             EditNoteScreen(
-                note = note,
+                note = screen.note,
                 onSave = { updatedNote ->
                     val newNotes = notes.map { if (it.id == updatedNote.id) updatedNote else it }
                     updateNotes(newNotes)
-                    selectedNote = null
+                    currentScreen = AppScreen.NoteList
+                }
+            )
+        }
+
+        is AppScreen.Calendar -> {
+            CalendarScreen(
+                onBack = {
+                    currentScreen = AppScreen.NoteList
                 }
             )
         }
@@ -139,15 +184,42 @@ fun NotesApp(repository: NoteRepository) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+fun AppTopBar(
+    title: String,
+    navigationIcon: @Composable () -> Unit = {},
+    actions: @Composable RowScope.() -> Unit = {}
+) {
+    TopAppBar(
+        title = { Text(title, color = Color.White) },
+        navigationIcon = navigationIcon,
+        actions = actions,
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = Color(0xFF29a4e6),
+            navigationIconContentColor = Color.White,
+            actionIconContentColor = Color.White
+        )
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 fun NoteScreen(
     notes: List<Note>,
     onAddNote: () -> Unit,
     onNoteClick: (Note) -> Unit,
-    onDeleteNote: (Note) -> Unit
+    onDeleteNote: (Note) -> Unit,
+    onMenuClick: () -> Unit
 ) {
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Notes") })
+            AppTopBar(
+                title = "Notes",
+                navigationIcon = {
+                    IconButton(onClick = onMenuClick) {
+                        Icon(Icons.Filled.Menu, contentDescription = "Menu")
+                    }
+                }
+            )
         },
         floatingActionButton = {
             FloatingActionButton(onClick = onAddNote) {
@@ -178,6 +250,24 @@ fun EditNoteScreen(note: Note, onSave: (Note) -> Unit) {
     var title by remember { mutableStateOf(note.title) }
     var content by remember { mutableStateOf(note.content) }
 
+    val sdf = SimpleDateFormat("dd/MM/yyyy", Locale.forLanguageTag("pt-BR")).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
+
+    val datePickerState = rememberDatePickerState(
+        initialSelectedDateMillis = remember(note.date) {
+            try {
+                sdf.parse(note.date)?.time
+            } catch (e: Exception) {
+                null
+            }
+        }
+    )
+    var showDatePicker by remember { mutableStateOf(false) }
+    val selectedDate = datePickerState.selectedDateMillis?.let {
+        sdf.format(Date(it))
+    } ?: note.date
+
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -186,12 +276,30 @@ fun EditNoteScreen(note: Note, onSave: (Note) -> Unit) {
         }
     }
 
+    if (showDatePicker) {
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = { showDatePicker = false }) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) {
+                    Text("Cancel")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
+
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Edit Note") },
+            AppTopBar(
+                title = "Edit Note",
                 navigationIcon = {
-                    IconButton(onClick = { onSave(note.copy(title = title, content = content)) }) {
+                    IconButton(onClick = { onSave(note.copy(title = title, content = content, date = selectedDate)) }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -205,6 +313,7 @@ fun EditNoteScreen(note: Note, onSave: (Note) -> Unit) {
     ) { innerPadding ->
         Column(
             modifier = Modifier
+                .fillMaxSize()
                 .padding(innerPadding)
                 .padding(16.dp)
         ) {
@@ -213,6 +322,16 @@ fun EditNoteScreen(note: Note, onSave: (Note) -> Unit) {
                 onValueChange = { title = it },
                 label = { Text("Title") },
                 modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = selectedDate,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Date") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showDatePicker = true }
             )
             Spacer(modifier = Modifier.height(8.dp))
             LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -229,6 +348,7 @@ fun EditNoteScreen(note: Note, onSave: (Note) -> Unit) {
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
+
                         is ContentBlock.ImageBlock -> {
                             AsyncImage(
                                 model = block.uri,
@@ -239,6 +359,36 @@ fun EditNoteScreen(note: Note, onSave: (Note) -> Unit) {
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CalendarScreen(onBack: () -> Unit) {
+    Scaffold(
+        topBar = {
+            AppTopBar(
+                title = "Calendar",
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .padding(innerPadding)
+                .fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            val datePickerState = rememberDatePickerState()
+            DatePicker(
+                state = datePickerState,
+                modifier = Modifier.padding(16.dp)
+            )
         }
     }
 }
@@ -280,10 +430,11 @@ fun NoteItem(note: Note, onClick: () -> Unit, onDelete: () -> Unit) {
 fun NoteScreenPreview() {
     ProjetoAgendaTheme {
         NoteScreen(
-            notes = listOf(Note(title = "Note 1", content = listOf(ContentBlock.TextBlock("Content 1")))),
+            notes = listOf(Note(title = "Note 1", content = listOf(ContentBlock.TextBlock("Content 1")), date = "25/07/2024")),
             onAddNote = {},
             onNoteClick = { _ -> },
-            onDeleteNote = {}
+            onDeleteNote = {},
+            onMenuClick = {}
         )
     }
 }
